@@ -55,7 +55,7 @@ class SmokeExperimentTests(unittest.TestCase):
             options.bf_strategies = []
             options.sift_control = method == "sift_lightglue"
             rows = run_experiment(list(iter_graf_pairs(ROOT / "data/graf"))[:1], options)
-            self.assertEqual(len(rows), 2 if options.sift_control else 1)
+            self.assertEqual(len(rows), 3 if options.sift_control else 1)
             self.assertEqual(rows[0]["matching_strategy"], "superglue" if method == "superpoint_superglue" else "lightglue")
 
     def test_superpoint_lightglue(self):
@@ -77,5 +77,33 @@ class SmokeExperimentTests(unittest.TestCase):
             options.limit_sources = 1
             options.settings = ["identity_0", "rotation_30", "perspective_0.06"]
             rows = run_synthetic(options)
-            self.assertEqual(len(rows), 6)
-            self.assertEqual(sum(r["transformation_type"] == "identity" for r in rows), 2)
+            self.assertEqual(len(rows), 12)
+            self.assertEqual(sum(r["transformation_type"] == "identity" for r in rows), 4)
+
+    def test_photometric_with_shared_matchers_and_sift_controls(self):
+        from datasets.synthetic import DEFAULT_MANIFEST
+        from experiments.run_synthetic import run_synthetic
+        from features import MAIN_METHODS
+        with self.temporary_output() as directory:
+            options = self.options(Path(directory) / "photometric_all")
+            options.methods = MAIN_METHODS
+            options.sift_control = True
+            options.data_root = ROOT / "data/hpatches"
+            options.source_manifest = DEFAULT_MANIFEST
+            options.limit_sources = 1
+            options.settings = ["identity_0", "brightness_30", "contrast_0.8", "gamma_1.25"]
+            rows = run_synthetic(options)
+            self.assertEqual(sum(r["is_primary"] for r in rows), 4 * 17)
+            self.assertEqual(sum(not r["is_primary"] for r in rows), 4 * 2)
+            self.assertEqual(sum(r["transformation_type"] == "identity" for r in rows), 19)
+            import numpy as np
+            import json
+            for row in rows:
+                np.testing.assert_array_equal(json.loads(row["H_gt"]), np.eye(3))
+                self.assertEqual(row["width_image1"], row["width_image2"])
+                self.assertEqual(row["height_image1"], row["height_image2"])
+            for pair in {r["pair"] for r in rows}:
+                sp = [r for r in rows if r["pair"] == pair and r["method"].startswith("superpoint")]
+                self.assertEqual(len(sp), 4)
+                for key in ("feature_sha256_image1", "feature_sha256_image2", "extraction_id_image1", "extraction_id_image2"):
+                    self.assertEqual(len({r[key] for r in sp}), 1)

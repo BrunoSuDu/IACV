@@ -9,6 +9,8 @@ from features import BF_METHODS, CLASSICAL_METHODS, LIGHTGLUE_METHODS, SUPERGLUE
 
 
 ROOT = Path(__file__).resolve().parents[2]
+PROTOCOL_VERSION = "part1-17x40-v1"
+RESULTS_ROOT = ROOT / "results" / PROTOCOL_VERSION
 FORMAL = {"max_keypoints": 2048, "warmup": 2, "repetitions": 5, "seed": 0,
           "threads": 4, "ratio": 0.8, "correctness_threshold": 3.0,
           "ransac_threshold": 3.0, "ransac_max_iters": 5000, "ransac_confidence": 0.995}
@@ -127,3 +129,7 @@ def primary_combinations():
 def expected_hpatches_records(pair_count=580):
     return {"ratio": len(BF_METHODS) * pair_count, "crosscheck": len(BF_METHODS) * pair_count,
             "lightglue": len(LIGHTGLUE_METHODS) * pair_count, "superglue": len(SUPERGLUE_METHODS) * pair_count}
+
+
+def control_combinations():
+    return [("sift_compatible_bf", "bf_ratio"), ("sift_compatible_bf", "bf_crosscheck")]

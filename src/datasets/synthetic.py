@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from transformations import transformation_grid
+from photometric import synthetic_grid
 
 
 DEFAULT_MANIFEST = Path(__file__).resolve().parents[2] / "configs/synthetic_sources.json"
@@ -57,5 +57,5 @@ class SyntheticPair:
         return f"in_memory:{self.name}"
 
 
-def expected_synthetic_records(source_count=8, method_count=10, setting_count=None):
-    return source_count * (len(transformation_grid()) if setting_count is None else setting_count) * method_count
+def expected_synthetic_records(source_count=8, combination_count=17, setting_count=None):
+    return source_count * (len(synthetic_grid()) if setting_count is None else setting_count) * combination_count

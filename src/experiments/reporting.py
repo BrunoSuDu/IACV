@@ -9,8 +9,9 @@ import scipy
 
 
 def save_metadata(options, pairs, extra=None):
-    from experiments.protocol import code_identity
+    from experiments.protocol import PROTOCOL_VERSION, code_identity
     metadata = {
+        "protocol_version": PROTOCOL_VERSION,
         "options": {key: str(value) if isinstance(value, Path) else value
                     for key, value in vars(options).items()},
         "python": platform.python_version(), "platform": platform.platform(),
@@ -53,7 +54,7 @@ def save_summary(rows, output):
         keys = ["dataset", "method", "matching_strategy", "transformation_type", "transformation_strength"]
     grouped = frame.groupby(keys, sort=False)
     numeric = [name for name in numeric if name not in keys]
-    summary = grouped[numeric].agg(["mean", "std", "count"])
+    summary = grouped[numeric].agg(["mean", "median", "std", "count"])
     summary.columns = [f"{metric}_{stat}" for metric, stat in summary.columns]
     summary = summary.copy()
     summary.insert(0, "pair_count", grouped.size())

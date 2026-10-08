@@ -93,7 +93,7 @@ def config_strategies(config, options):
     if config.matcher in LEARNED_MATCHERS:
         return [config.matcher]
     if config.name == CONTROL_CONFIG.name:
-        return ["ratio"]
+        return ["ratio", "crosscheck"]
     return list(getattr(options, "bf_strategies", None) or [getattr(options, "matching_strategy", None) or "ratio"])
 
 

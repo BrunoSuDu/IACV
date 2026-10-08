@@ -1,9 +1,10 @@
 # IACV Assignment 1 — Part 1 最终实验框架
 
-当前状态：**code prepared；tests NOT RUN；smoke experiments NOT RUN；benchmark NOT RUN**。
-本轮只进行了源码改造、课程 PDF/已安装官方源码阅读、AST 语法与 JSON 检查。
-语法检查不代表功能、模型兼容性或性能已经通过运行验证。
-原 results 的旧 CSV/figures/metadata 和旧生成报告已按用户授权清理。
+当前最终协议：**part1-17x40-v1**。基于与 GitHub main 一致的 `2a2c273` 扩展。
+用户已确认前一版 unit/BF/GRAF/learned/synthetic smoke 手动通过；本次保留其 geometry、模型及匹配实现。
+本轮运行了18个安全非实验性测试（手工小数组/表格、全部图像与模型操作mock的runner），均通过。
+本轮实际图片 smoke、模型推理、全部 benchmark：**NOT RUN**。新增实验仍需用户手动验证。
+正式输出改用新的 `results/part1-17x40-v1/`，本轮没有删除或迁移任何旧结果及 `tmp/smoke_*`。
 Part 2 panorama、blending、RANSAC threshold sensitivity 不在本轮范围。
 
 ## 项目结构
@@ -18,7 +19,8 @@ src/classical_pipeline.py      检测/描述计时；同一提取结果可交给
 src/matching.py                ratio / crosscheck，一对一匹配
 src/learned_features.py        共享 SuperPoint / SIFT-compatible 与 learned matchers
 src/superglue_adapter.py       固定官方 SuperGlue 源码/权重身份、输入与输出适配
-src/transformations.py         28 个唯一设置、精确 H、warp、valid mask
+src/transformations.py         保留28个geometry设置、精确H、warp、valid mask
+src/photometric.py             12个单因素photometric设置、逐像素公式与饱和比例
 src/feature_masks.py           同步过滤 keypoints/descriptors/native fields，特征哈希
 src/evaluation.py              GT correctness、分母、最大一对一 GT 对应、可选 masks
 src/homography.py              raw matches 的 RANSAC 与四角 GT 误差
@@ -28,7 +30,9 @@ src/experiments/protocol.py    统一参数、输出保护、输入/代码身份
 src/experiments/runner.py      共享提取、独立匹配、逐行进度、完成标记
 src/experiments/run_synthetic.py 独立合成实验
 src/experiments/run_supplementary.py FAST 与教学 BRIEF
-src/experiments/build_report.py 只读真实完成的 CSV 并生成新表格/曲线
+src/experiments/build_report.py 验收真实CSV，分开生成geometry/photometric曲线
+src/experiments/inventory.py   全17组合×40设置×8来源及controls的精确库存
+src/experiments/uncertainty.py sequence/source cluster bootstrap及leave-one-out
 src/run_supplementary.py       保留原 supplementary 入口
 src/visualization.py           keypoints、matches、synthetic context
 src/image_io.py                中文路径读图
@@ -73,8 +77,8 @@ CLI 的 `--matching-strategy ratio|crosscheck` 默认 ratio。LightGlue/SuperGlu
 
 完整运行中 SuperPoint 的 BF ratio/crosscheck、LightGlue 和 SuperGlue 共享一组 native features。
 记录 `feature_sha256_image1/2`、`extraction_id_image1/2`、run_id、缓存和共享字段。
-分别执行 `--only ratio` / `--only crosscheck` 会独立提取；report 必须验证特征哈希相同，
-并标记是否确为同一次提取测量。正式策略对照优先 `--only bf`。
+正式report同时验证特征哈希与extraction ID相同；分别运行ratio/crosscheck或learned阶段不能组成严格matcher-only对照。
+完整方案使用默认all或 `--only experiments`，使每个数据集的全部matcher在同一共享提取流程内运行。
 
 本地已静态核对官方 commit **eb42fee2d71449efb0aa5c10549752b5d75384d8**：
 `sift.py`、`utils.py`、`lightglue.py`、`superpoint.py` 和安装 direct_url.json。
@@ -91,7 +95,8 @@ scales `[1,N]`（OpenCV kp.size）、oris `[1,N]`（radians）、image_size `[1,
 官方兼容 extractor 是 detection_threshold=.0066667、num_octaves=4、edge_threshold=10、rootsift=True、nms_radius=0。
 因此原 SIFT BF 与 SIFT+LightGlue **不是严格 matcher-only comparison**。
 默认另写 `sift_compatible_bf` control，使用和 SIFT+LightGlue 同一次提取的完全相同 RootSIFT features，
-只将 matcher 换成 BF ratio。该 control 不属于十种主配置，也不计入 9860/2240。
+分别将 matcher 换成 BF Ratio、BF Cross-check，HPatches/GRAF/Synthetic全部运行。
+两个control是auxiliary，不属于十种主配置或17种主组合；数量1160/4/640，共1804。
 
 Compatible SIFT 在 CPU 提取，LightGlue 在所选 CPU/GPU；该 extractor 联合执行 detectAndCompute 与处理，
 记录 joint_extraction_ms，独立 detection/description 留 NaN。SuperPoint 同样记录联合时间。
@@ -130,8 +135,8 @@ GRAF 使用课程两对原图与 GT，作为 supplementary qualitative/geometric
 LightGlue/SuperPoint 模型仅从本地 `models/checkpoints/` 加载，缺少文件即报错，**runner 不隐式下载**。
 正式运行记录官方 release URL、commit、模型参数、device、GPU 和 checkpoint SHA-256，
 并检查 checkpoint 覆盖模型的所有 trained parameters（上游 strict=False 不足以保证这一点）。
-本轮观察到 SuperPoint 与其 LightGlue checkpoint 已存在；**SIFT LightGlue checkpoint 尚缺失**。
-需要你手动下载，以下命令只作为说明，没有被执行；不会覆盖现有文件：
+用户已完成前一版模型smoke。现有模型和固定第三方源码保持原样；以下准备命令仅供另一环境重建，
+本轮没有执行下载，不会覆盖现有文件：
 
 ```powershell
 New-Item -ItemType Directory -Force models/checkpoints | Out-Null
@@ -205,9 +210,9 @@ Adapter 只将共享 `[1,N,256]` 描述子转置并 contiguous；不重提取、
 
 输出 matches0/1、matching_scores0/1 均检查长度、整数索引、范围、有限 scores、双向一致性；
 -1 unmatched 丢弃；`DMatch.distance=1-confidence` 仅供统一展示，不是描述子距离。
-空特征直接记录零 matching time，模型初始化不计时。模型加载/推理兼容性尚未验证。
+空特征直接记录零 matching time，模型初始化不计时。用户已验证前一版模型smoke；本轮没有重新运行推理。
 
-报告提供 BF ratio–LightGlue、BF ratio–SuperGlue、LightGlue–SuperGlue 的 matching quality、
+报告提供SuperPoint四种matcher的六个两两配对，以及RootSIFT三种matcher的三个两两配对，包含matching quality、
 homography（success/failure、error mean/median、3/5px accuracy）与 matching runtime 配对比较，
 分别输出 `learned_comparisons.csv`、`graf_learned_comparisons.csv`、`synthetic_learned_comparisons.csv`。
 校验 fingerprint 覆盖 keypoints/descriptors/scores/image sizes；extraction IDs 判断是否同一次提取测量。
@@ -218,8 +223,8 @@ BF ratio–crosscheck 对照另有独立配对表。Runtime 表分列 extraction
 固定 manifest 在 `configs/synthetic_sources.json`：
 `i_ajuntament,i_autannes,i_bologna,i_books,v_abstract,v_adam,v_apprentices,v_artisans` 的 `1.ppm`。
 规则是当前已安装快照中各类别按名称排序的前四个序列，已冻结路径，不按结果选图、不随机替换。
-**尚未视觉确认场景多样性**，请你在正式运行前查看八张图；如果决定更换，应先冻结新 manifest，
-保留四张 illumination/四张 viewpoint，并按同一 manifest 从零运行。
+本轮不替换源图。请在正式运行前检查八张图的可读性与场景覆盖；本协议拒绝不同于现有frozen manifest的来源。
+八张图不是从更广泛场景总体随机采样，相关不确定性只用于描述这组固定来源。
 缺任何一张图直接失败，不补选。正式运行保存图像尺寸、原图 SHA-256 和 source-selection 说明。
 
 | 操作 | 参数 | H 的定义 |
@@ -238,7 +243,10 @@ y 不变。正 s 使上边变窄、下边变宽。用 float64 八方程解 H，�
 所有 H 的方向是 **original → transformed**；warp 使用和保存的 H 同一矩阵。
 
 各曲线的 identity 合并为一个 `identity_0`：1+6+5+4+4+4+4=28 unique settings/source。
-八张原图共224 pairs，十配置共2240 rows。曲线可引用同一 identity 行，绝不增加 raw measurement。
+Geometry仍为224 pairs，但每pair运行17个主组合，共3808 primary rows。
+每个BF feature source先提取一次，再分别计时Ratio/Cross-check；learned不加BF过滤。
+Photometric另加96 pairs、1632 primary rows；共享geometry中的identity，不新增baseline记录。
+Synthetic总计320 unique pairs、5440 primary rows，加640 auxiliary rows；raw CSV总行数6080。
 
 固定 canvas 为原图 width/height，原点(0,0)，不扩展、不追加 canvas 平移；内容可能裁切。
 图像用 INTER_LINEAR 和 BORDER_REFLECT_101，减少黑色填充的突变。
@@ -265,6 +273,44 @@ matching 和 RANSAC 不接受 H_gt，也不使用 GT 筛选后的 matches。
 **限制**：后过滤不能完全消除 padding 对 Gaussian/nonlinear scale spaces、CNN receptive fields、
 orientation 和 top-k 选择的影响；3*size 是统一的有限支持近似，不是各 descriptor 的严格支持证明。
 原图边缘也会损失特征，小尺度时有效区域可明显减少；report 必须结合 overlap 和计数解释。
+
+## Synthetic Photometric：单因素定义
+
+从现有loader生成的uint8灰度图x出发，每次只改变一种强度，不叠加geometry或另一种photometric操作。
+
+| 操作 | 四个非identity参数 | float64公式 |
+|---|---|---|
+| brightness | -60, -30, 30, 60 | y=x+b |
+| contrast | .6, .8, 1.2, 1.4 | y=127.5+c*(x-127.5) |
+| gamma | .6, .8, 1.25, 1.6 | y=255*(x/255)^gamma；不是1/gamma |
+
+先clip y到[0,255]，再 `np.rint`（恰好半整数时ties-to-even），最后转uint8。输入不被原地修改。
+`photometric_clipped_fraction` 是量化前y严格<0或>255的像素比例；
+`photometric_saturated_fraction` 是输出uint8等于0或255的比例；另存source saturation比例作参考。
+这两个量不同：rounding可能产生端点，但不算float越界clip；gamma仍可能有saturation而clip比例为0。
+
+H_gt严格为float64 identity，不resize、不插值、不移动坐标；输出shape/dtype检查保持不变。
+Photometric使用原图同一support mask；几何overlap=1，support_overlap仍反映边缘安全区域的损失。
+用于展示时把变换后的灰度图复制为BGR三通道，不对输入图像空间重采样。
+Geometry实现及其28个设置、H方向、坐标和mask策略未改。
+
+`transformation_family` 区分geometry/photometric；`identity_baseline_id`指向来源图像的唯一identity_0。
+contrast/gamma曲线在参数1、brightness曲线在0引用该baseline；没有额外photometric identity原始行。
+Geometry和photometric曲线分目录输出，曲线CSV是对原始测量的引用，不可相加作为独立sample总数。
+
+## Reporting与不确定性
+
+- 主摘要同时给mean/median/sample std/valid count；Homography单列失败数、success rate、有效error数及3px/5px accuracy。
+- `*_matcher_controls_paired.csv` 保留SuperPoint六个matcher配对与RootSIFT三个配对，另有普通SIFT对SIFT+LG的非matcher-only比较。
+- `synthetic_geometry_curves.csv`、`synthetic_photometric_curves.csv` 和对应figure目录分开；method+strategy共同分组，禁止把Ratio/Cross-check混成一条线。
+- `synthetic_ratio_crosscheck_paired.csv`、`synthetic_ratio_crosscheck_curves.csv` 保存七种BF每个level的配对差及source std；identity只在曲线引用。
+- `synthetic_summary.csv`包含overlap、保留点数、实际correctness分母、clip/saturation比例；`synthetic_source_descriptions.csv`逐来源/因素描述，不把40个level当40个场景。
+- `*_cluster_uncertainty.csv`用固定seed0、2000次cluster bootstrap，给95% percentile CI、有效cluster/row/resample数、leave-one-cluster-out范围。NaN不填0；不足两个有效cluster时CI留NaN。
+- HPatches在illumination/viewpoint内按sequence整组重采样，保持同sequence全部pair一起出现。点估计仍为有效pair的宏平均，重采样时保留各cluster的有效值分子/分母。
+- Synthetic每个method/strategy/level以八个source为cluster；只提供固定八图的描述性不确定性，不能视为随机场景总体的高精度推断。对配对差也重采样source，而不是把变换level当独立cluster。
+- `hpatches_ratio_crosscheck_cluster_ci.csv`与 `*_matcher_control_uncertainty.csv`给配对差的cluster区间。所有CI逐指标计算，不是多重比较校正后的显著性检验。
+- `*_runtime_by_device.csv`明确extraction/matching设备；`*_unique_extraction_measurements.csv`按extraction ID去重，避免把缓存/共享提取时间当独立样本。普通pair runtime仍是阶段耗时，不是end-to-end wall time。
+- `*_descriptor_schema.csv`保留dim/dtype/bytes，每种方法都有memory统计。所有controls另表统计，不加入15300主记录。
 
 ## 正式协议与指标
 
@@ -304,13 +350,13 @@ Descriptor memory 仅数组载荷，排除模型、激活、Python对象与显�
 ## 结果目录、数量与防覆盖
 
 ```text
-results/
+results/part1-17x40-v1/
   ratio/{hpatches_classical,hpatches_superpoint,graf}/
   crosscheck/{hpatches_classical,hpatches_superpoint,graf}/
   lightglue/{hpatches_superpoint,hpatches_sift,graf}/
   superglue/{hpatches_superpoint,graf}/
-  lightglue/hpatches_sift_control/   额外580行，不计主表
-  lightglue/graf_control/           额外2行
+  lightglue/hpatches_sift_control/   额外1160行，不计主表
+  lightglue/graf_control/           额外4行
   synthetic/{raw,summary,figures}/
   supplementary/{fast_parameters.csv,brief_sampling.csv,metadata.json,complete.json}
   comparison/                      新报告、配对表、runtime/memory、homography、synthetic curves
@@ -323,11 +369,15 @@ results/
 | HPatches LightGlue | 2*580=1160 |
 | HPatches SuperGlue | 1*580=580 |
 | HPatches 合计 | **9860** |
-| Synthetic | 8*28*10=**2240** |
-| 两类主要合计 | **12100** |
+| Synthetic geometry（含唯一identity） | 8*28*17=**3808** |
+| Synthetic photometric（不另加identity） | 8*12*17=**1632** |
+| Synthetic primary合计 | **5440** |
+| HPatches + Synthetic primary | **15300** |
 | GRAF supplementary | 17 method/strategy combinations*2=34 |
 
-主表有十种 method、17种 method/strategy组合；每组合 illumination=285、viewpoint=295。
+四类数据均使用十种method、17种主组合；HPatches每组合illumination=285、viewpoint=295。
+Auxiliary controls：HPatches1160、synthetic640、GRAF4，共1804。
+Synthetic raw中通过 `is_primary` 区分5440主记录与640control；report先拆分再计算库存和统计，不混入primary总数。
 BF control、GRAF、FAST/BRIEF 均独立统计，不改变主表计数。
 FAST thresholds10/20/40 × nonmaxTrue/False，加 SIFT detector baseline；
 教学 BRIEF uniform/Gaussian、256bits、31px patch、seed0。选定GRAF2对与HPatches10对；不做额外参数网格。
@@ -348,7 +398,7 @@ Report 只读上述新路径。CSV库存、重复、类别、配置、参数、�
 特征配对和完成标记有校验；缺文件返回 PENDING/exit2，不创建假表或宣称 validation passed。
 结果从真实CSV计算，不硬编码算法排名。所有比例采用pair宏平均，std为pair/source间sample std。
 Qualitative figures 每集合最多100条线，标题记录全量数量；定量指标使用完整match集合。
-最终新报告位于 `results/comparison/PART1_RESULTS.md`，不再覆盖项目根目录的旧报告。
+最终新报告位于 `results/part1-17x40-v1/comparison/PART1_RESULTS.md`，不再覆盖项目根目录的旧报告。
 
 ## 手动执行顺序（以下命令均未由 Codex 执行）
 
@@ -371,7 +421,7 @@ Remove-Item Env:IACV_RUN_MODEL_TESTS
 ```
 
 上述第二条会执行模型推理，只由用户手动运行。测试永不下载模型；部分模型测试缺少checkpoint则skip，SuperGlue的缺文件/哈希不一致直接失败，
-skip不是成功验证。所有当前测试状态：**NOT RUN — user will execute manually**。
+skip不是成功验证。前一版测试由用户报告通过；本轮仅运行下文列出的18个非实验测试，其余重跑状态 **NOT RUN**。
 
 另有默认skip的实际smoke测试文件，可在准备好数据/模型后手动运行（会处理图片和推理）：
 
@@ -397,7 +447,7 @@ Remove-Item Env:IACV_RUN_SMOKE_TESTS
 .\.venv\Scripts\python.exe src/main.py --dataset graf --methods sift_lightglue --sift-control --limit-pairs 1 --warmup 0 --repetitions 1 --device cuda --figures --output tmp/smoke_sift_lightglue
 ```
 
-第二条应有一个主配置和一个独立control，共2行；不加BF strategy参数。
+第二条应有一个主配置和两个control策略，共3行；不加BF strategy参数。
 
 三个 SuperPoint matcher 的共享提取 smoke（仅由用户手动执行，预期3行）：
 
@@ -413,7 +463,25 @@ Remove-Item Env:IACV_RUN_SMOKE_TESTS
 .\.venv\Scripts\python.exe src/experiments/run_synthetic.py --limit-sources 1 --settings identity_0 rotation_30 scale_0.75 translation_x_0.1 shear_0.125 perspective_0.06 --methods sift orb --warmup 0 --repetitions 1 --device cpu --figures --output tmp/smoke_synthetic
 ```
 
-应有1*6*2=12行。检查H方向、valid mask、overlap、特征过滤和figure；不是正式结果。
+应有1*6*2方法*2策略=24行。检查H方向、valid mask、overlap、特征过滤和figure；不是正式结果。
+
+### 新增 Photometric smoke（仅用户手动执行）
+
+经典双策略：1来源 × 4设置 × 2方法 × 2策略 = 16 primary rows：
+
+```powershell
+.\.venv\Scripts\python.exe src/experiments/run_synthetic.py --limit-sources 1 --settings identity_0 brightness_30 contrast_0.8 gamma_1.25 --methods sift orb --warmup 0 --repetitions 1 --device cpu --figures --output tmp/smoke_photo_classical_v2
+```
+
+全17组合及RootSIFT controls：1来源 × 4设置 = 68 primary + 8 auxiliary rows：
+
+```powershell
+.\.venv\Scripts\python.exe src/experiments/run_synthetic.py --limit-sources 1 --settings identity_0 brightness_30 contrast_0.8 gamma_1.25 --warmup 0 --repetitions 1 --max-keypoints 128 --device cuda --figures --output tmp/smoke_photo_all_v2
+```
+
+检查所有H为identity、尺寸不变、clip/saturation在[0,1]、SP四matcher哈希/ID相同，RootSIFT三matcher相同。
+identity恰有19行（17 primary+2 auxiliary），只因真实matcher组合不同；不另外添加photometric baseline。
+同一路径非空会拒绝；如已运行这些命令，请改用新tmp名称，旧smoke无需迁移。
 
 ### Step 5 — Output/report validation
 
@@ -455,31 +523,18 @@ Remove-Item Env:IACV_RUN_SMOKE_TESTS
 需要重新生成report时请选择新目录，避免覆盖已有报告：
 
 ```powershell
-.\.venv\Scripts\python.exe src/experiments/build_report.py --output results/comparison_review
+.\.venv\Scripts\python.exe src/experiments/build_report.py --output results/part1-17x40-v1/comparison_review
 ```
 
-### 各正式阶段独立调用
+### 分阶段执行的边界
 
-```powershell
-.\.venv\Scripts\python.exe run_part1.py --only bf --device cuda --figures
-.\.venv\Scripts\python.exe run_part1.py --only lightglue --device cuda --figures
-.\.venv\Scripts\python.exe run_part1.py --only superglue --device cuda --figures
-.\.venv\Scripts\python.exe run_part1.py --only synthetic --device cuda --figures
-.\.venv\Scripts\python.exe run_part1.py --only supplementary
-.\.venv\Scripts\python.exe run_part1.py --only report
-```
+`--only bf/ratio/crosscheck/lightglue/superglue` 保留为独立诊断入口，但它们各自提取features，不能拼接成严格matcher-only正式报告。
+推荐默认all；若需要分离计算与报告，使用一次 `--only experiments`，随后 `--only report`。
+Synthetic内部统一运行geometry+photometric并共享identity，不拆成两个独立baseline实验。
 
-这组也是默认all的替代方案。BF、LightGlue、SuperGlue分开运行时SuperPoint独立提取，report会检查feature内容；
-严格共用SuperPoint提取测量需默认all或 `--only experiments`。
-单策略阶段也支持，优先共享bf阶段：
-
-```powershell
-.\.venv\Scripts\python.exe run_part1.py --only ratio --device cuda --figures
-.\.venv\Scripts\python.exe run_part1.py --only crosscheck --device cuda --figures
-```
-
-所有实验可用 `--results-root results/run_02` 选择全新根目录，report同样传该参数。
-分阶段必须使用相同device、代码、参数和数据；修改源码/config后不能混合已有阶段结果。
+重跑时可用 `--results-root results/part1-17x40-v1_run02` 指定全新根目录，report也必须传同一根目录。
+完整入口没有关闭controls的选项；独立synthetic smoke才允许缩小methods/settings或 `--no-sift-control`。
+代码、protocol版本、环境、输入哈希、模型身份、库存与特征/提取ID不一致的阶段不能混用。
 
 ## 静态审查依据、测试与尚未确认项
 
@@ -490,9 +545,10 @@ Remove-Item Env:IACV_RUN_SMOKE_TESTS
 
 新增测试：matching strategies、synthetic geometry/masks、learned tensors/pinned API/opt-in inference、
 evaluation公式/失败/GT隔离、results输出保护/runner共享/完整性。原test_geometry和test_brief保留。
-所有unit、smoke、integration：**NOT RUN**；所有正式benchmark：**NOT RUN**。
+本轮 test_final_design.py（8项）、test_results_runner.py（9项）、test_synthetic_orchestration.py（1项）通过。
+其他unit重跑、实际smoke、integration和正式benchmark：**NOT RUN**。
 
-仍需人工确认：八图场景多样性；SIFT checkpoint及SuperGlue官方文件的手动准备与实际加载；本机CUDA确定性kernel、
+仍需人工确认：固定八图覆盖的限制；本次扩展的实际photometric/共享策略smoke；本机CUDA确定性kernel、
 显存与full-resolution推理；OpenCV各descriptor实际保留的indices；warp/interpolation的可视质量；
 CSV/figures的真实生成与全库存完成。AST语法检查无法证明这些运行性质。
 源码职责与静态核查记录另见 `docs/PART1_IMPLEMENTATION.md`。

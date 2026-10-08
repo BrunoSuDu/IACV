@@ -16,7 +16,7 @@ from evaluation import (count_ground_truth_correspondences, evaluate_feature_mat
 from image_io import load_image
 from matching import match_descriptors
 from timing import measure
-from experiments.protocol import add_protocol_arguments, input_manifest, reserve_outputs, validate_options
+from experiments.protocol import RESULTS_ROOT, add_protocol_arguments, input_manifest, reserve_outputs, validate_options
 from experiments.reporting import save_metadata
 
 
@@ -102,7 +102,7 @@ def main():
     add_protocol_arguments(parser)
     parser.add_argument("--graf-root", type=Path, default=ROOT / "data/graf")
     parser.add_argument("--hpatches-root", type=Path, default=ROOT / "data/hpatches")
-    parser.add_argument("--output", type=Path, default=ROOT / "results/supplementary")
+    parser.add_argument("--output", type=Path, default=RESULTS_ROOT / "supplementary")
     args = parser.parse_args()
     validate_options(args)
     # This fixed supplementary protocol intentionally has no threshold sweeps.

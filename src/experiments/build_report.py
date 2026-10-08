@@ -11,9 +11,12 @@ import cv2
 ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 from evaluation import validate_metrics
-from experiments.protocol import FORMAL, check_output, primary_combinations, reserve_outputs, result_folder
+from experiments.protocol import FORMAL, PROTOCOL_VERSION, RESULTS_ROOT, control_combinations, check_output, primary_combinations, reserve_outputs, result_folder
 from features import BF_METHODS, CONFIGS, CONTROL_CONFIG, MAIN_METHODS, LEARNED_MATCHERS
-from transformations import CURVE_VALUES, is_identity, transformation_grid
+from transformations import CURVE_VALUES, homography_for, Transformation, transformation_grid
+from photometric import PHOTOMETRIC_VALUES, PHOTOMETRIC_PROTOCOL
+from experiments.inventory import validate_synthetic_inventory
+from experiments.uncertainty import BOOTSTRAP, cluster_summary
 
 
 PAIRED_METRICS = ["n_correct", "precision", "recall", "pmr", "matching_score", "ransac_inliers",
@@ -24,17 +27,21 @@ QUALITY = ["detector_repeatability", "feature_repeatability", "pmr", "precision"
            "homography_success", "matching_ms", "detection_ms_image1", "detection_ms_image2",
            "description_ms_image1", "description_ms_image2", "joint_extraction_ms_image1",
            "joint_extraction_ms_image2", "bytes_per_descriptor", "descriptor_memory_bytes_image1",
-           "descriptor_memory_bytes_image2", "detected_keypoints_image1", "detected_keypoints_image2"]
+           "descriptor_memory_bytes_image2", "detected_keypoints_image1", "detected_keypoints_image2",
+           "features_image1_total", "features_image2_total", "n_correspondences", "n_incorrect",
+           "detector_n_features", "detector_n_correspondences", "descriptor_dim"]
 
 
 def required_folders(root, scope="all"):
     paths = []
     if scope in ("all", "hpatches"):
+        paths.append(Path(root) / "lightglue/hpatches_sift_control")
         for method, strategy in primary_combinations():
             stage = strategy.removeprefix("bf_")
             paths.append(result_folder(root, "hpatches", method, stage))
     if scope == "all":
         paths.extend(Path(root) / stage / "graf" for stage in ("ratio", "crosscheck", "lightglue", "superglue"))
+        paths.append(Path(root) / "lightglue/graf_control")
         paths.append(Path(root) / "supplementary")
     if scope in ("all", "synthetic"):
         paths.append(Path(root) / "synthetic/raw")
@@ -43,6 +50,8 @@ def required_folders(root, scope="all"):
 
 def check_metadata(folder):
     metadata = json.loads((folder / "metadata.json").read_text(encoding="utf-8"))
+    if metadata.get("protocol_version") != PROTOCOL_VERSION:
+        raise ValueError("Results belong to a different experimental protocol")
     for key, expected in FORMAL.items():
         if metadata["options"].get(key) != expected:
             raise ValueError(f"Nonformal {key} in {folder}")
@@ -181,34 +190,33 @@ def validate_hpatches(frame):
     paired_bf(frame)  # Raises on mismatched feature contents.
 
 
-def validate_synthetic(frame):
-    if len(frame) != 2240 or set(frame.method) != set(MAIN_METHODS) or set(frame.dataset) != {"synthetic"}:
-        raise ValueError("Expected 2240 synthetic records / ten primary methods")
-    settings = {(s.kind, s.parameter) for s in transformation_grid()}
-    sources = set(frame.source_image)
-    if (len(sources) != 8 or sum(Path(p).parent.name.startswith("i_") for p in sources) != 4
-            or sum(Path(p).parent.name.startswith("v_") for p in sources) != 4):
-        raise ValueError("Synthetic requires 4 illumination and 4 viewpoint sources")
-    for (method, source), group in frame.groupby(["method", "source_image"]):
-        if len(group) != 28 or set(zip(group.transformation_type, group.transformation_strength)) != settings:
-            raise ValueError(f"Missing or duplicate transformation setting: {method}/{source}")
-        if group.transformation_type.eq("identity").sum() != 1:
-            raise ValueError("Identity must be measured once per source and method")
-    if not frame.overlap_ratio.between(0, 1).all() or not frame.support_overlap_ratio.between(0, 1).all():
-        raise ValueError("Invalid synthetic overlap")
+def validate_synthetic(frame, auxiliary=False):
+    validate_synthetic_inventory(frame, auxiliary)
     validate_configuration_rows(frame)
-    expected_strategies = {m: CONFIGS[m].matcher if CONFIGS[m].matcher in LEARNED_MATCHERS else "bf_ratio"
-                           for m in MAIN_METHODS}
-    if any(strategy != expected_strategies[method] for method, strategy in zip(frame.method, frame.matching_strategy)):
-        raise ValueError("Synthetic uses ratio for BF and the registered learned matcher")
+    for column in ("overlap_ratio", "support_overlap_ratio", "target_valid_ratio"):
+        if not frame[column].between(0, 1).all():
+            raise ValueError("Invalid synthetic overlap")
     for _, group in frame.groupby("synthetic_pair_id"):
-        if len(group) != len(MAIN_METHODS) or set(group.method) != set(MAIN_METHODS):
-            raise ValueError("Synthetic pair missing a primary method")
-        if group.H_gt.nunique() != 1 or group.overlap_ratio.nunique() != 1:
-            raise ValueError("Methods used inconsistent synthetic GT/canvas")
-        H = np.asarray(json.loads(group.H_gt.iloc[0]), dtype=np.float64)
-        if H.shape != (3, 3) or not np.isfinite(H).all() or np.linalg.matrix_rank(H) != 3:
-            raise ValueError("Invalid synthetic GT H")
+        shared = ["H_gt", "overlap_ratio", "support_overlap_ratio", "height_image1", "width_image1",
+                  "height_image2", "width_image2", "photometric_clipped_fraction", "photometric_saturated_fraction"]
+        if any(group[key].nunique(dropna=False) != 1 for key in shared):
+            raise ValueError("Methods used inconsistent synthetic GT/canvas/intensities")
+        row = group.iloc[0]
+        shape = (int(row.height_image1), int(row.width_image1))
+        if shape != (row.height_image2, row.width_image2):
+            raise ValueError("Synthetic canvas dimensions changed")
+        H = np.asarray(json.loads(row.H_gt), dtype=np.float64)
+        photo = row.transformation_type in PHOTOMETRIC_VALUES
+        expected_H = np.eye(3) if photo else homography_for(Transformation(row.transformation_type, row.transformation_strength), shape)
+        if H.shape != (3, 3) or not np.isfinite(H).all() or not np.allclose(H, expected_H, rtol=1e-10, atol=1e-10):
+            raise ValueError("Synthetic GT differs from the defined transformation")
+        if photo:
+            if row.overlap_ratio != 1 or row.interpolation != "none" or row.border_mode != "none":
+                raise ValueError("Photometric transformation must not resample/crop coordinates")
+            for column in ("photometric_clipped_fraction", "photometric_saturated_fraction", "photometric_source_saturated_fraction"):
+                if not group[column].between(0, 1).all():
+                    raise ValueError("Missing/invalid photometric clipping statistics")
+    paired_bf(frame)
 
 
 def paired_bf(frame):
@@ -225,13 +233,15 @@ def paired_bf(frame):
     paired["shared_extraction_measurement"] = (
         paired.extraction_id_image1_ratio.eq(paired.extraction_id_image1_crosscheck)
         & paired.extraction_id_image2_ratio.eq(paired.extraction_id_image2_crosscheck))
+    if not paired.shared_extraction_measurement.all():
+        raise ValueError("Ratio/crosscheck must share the same extraction measurements")
     for metric in PAIRED_METRICS:
         paired[metric + "_delta_crosscheck_minus_ratio"] = paired[metric + "_crosscheck"].astype(float) - paired[metric + "_ratio"].astype(float)
     return paired
 
 
 def aggregate(frame, keys, metrics=QUALITY):
-    table = frame.groupby(keys)[metrics].agg(["mean", "std", "count"])
+    table = frame.groupby(keys)[metrics].agg(["mean", "median", "std", "count"])
     table.columns = [f"{name}_{stat}" for name, stat in table.columns]
     return table.reset_index()
 
@@ -257,13 +267,17 @@ def curve_data(frame):
     """Reference one identity measurement in each curve; never add raw observations."""
     identity = frame[frame.transformation_type == "identity"]
     pieces = []
-    for kind, values in CURVE_VALUES.items():
+    for kind, values in {**CURVE_VALUES, **PHOTOMETRIC_VALUES}.items():
         part = frame[frame.transformation_type == kind].copy()
         part["curve"] = kind
         part["curve_parameter"] = part.transformation_strength
         baseline = identity.copy()
         baseline["curve"] = kind
-        baseline["curve_parameter"] = 1.0 if kind == "scale" else 0.0
+        baseline["curve_parameter"] = 1.0 if kind in ("scale", "contrast", "gamma") else 0.0
+        baseline["baseline_reference"] = True
+        part["baseline_reference"] = False
+        family = "photometric" if kind in PHOTOMETRIC_VALUES else "geometry"
+        part["curve_family"] = baseline["curve_family"] = family
         # Vertical translation also references the same zero baseline.
         pieces.extend([part, baseline])
     return pd.concat(pieces, ignore_index=True)
@@ -274,52 +288,85 @@ def plot_synthetic(frame, output):
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     curves = curve_data(frame)
-    metrics = ["detector_repeatability", "feature_repeatability", "matching_score", "precision", "recall", "homography_success", "homography_error_px"]
-    summary = aggregate(curves, ["curve", "curve_parameter", "method"], metrics + ["overlap_ratio", "support_overlap_ratio"])
-    summary.to_csv(output / "synthetic_curves.csv", index=False)
-    folder = output / "synthetic_figures"
-    folder.mkdir()
-    for kind, values in summary.groupby("curve"):
-        for metric in metrics:
+    metrics = ["detector_repeatability", "feature_repeatability", "matching_score", "precision", "recall",
+               "homography_success", "homography_error_px", "matching_ms", "n_features", "n_correspondences",
+               "features_image1_total", "features_image2_total", "overlap_ratio", "support_overlap_ratio"]
+    summary = aggregate(curves, ["curve_family", "curve", "curve_parameter", "method", "matching_strategy"], metrics)
+    for family in ("geometry", "photometric"):
+        summary[summary.curve_family == family].to_csv(output / f"synthetic_{family}_curves.csv", index=False)
+        folder = output / f"synthetic_{family}_figures"
+        folder.mkdir()
+        for kind, values in summary[summary.curve_family == family].groupby("curve"):
+            for metric in metrics:
+                figure, axis = plt.subplots(figsize=(12, 7))
+                for (method, strategy), group in values.groupby(["method", "matching_strategy"], sort=False):
+                    group = group.sort_values("curve_parameter")
+                    axis.errorbar(group.curve_parameter, group[metric + "_mean"],
+                                  yerr=group[metric + "_std"].fillna(0), marker="o",
+                                  linestyle="--" if strategy == "bf_crosscheck" else "-",
+                                  label=f"{method}/{strategy}", capsize=2)
+                axis.set_xlabel(kind + " parameter")
+                axis.set_ylabel(metric + " (mean ± source sample std)")
+                axis.grid(alpha=.2)
+                axis.legend(fontsize=7, bbox_to_anchor=(1.01, 1), loc="upper left")
+                figure.tight_layout()
+                figure.savefig(folder / f"{kind}_{metric}.png", dpi=150)
+                plt.close(figure)
+    paired = paired_bf(frame)
+    paired.to_csv(output / "synthetic_ratio_crosscheck_paired.csv", index=False)
+    deltas = [metric + "_delta_crosscheck_minus_ratio" for metric in PAIRED_METRICS]
+    # Use the same baseline references only for plotting; raw paired observations stay unique.
+    for column in ("transformation_type", "transformation_strength", "source_image"):
+        paired[column] = paired[column + "_ratio"]
+    paired_curves = curve_data(paired)
+    delta_summary = aggregate(paired_curves, ["curve_family", "curve", "curve_parameter", "method"], deltas)
+    delta_summary.to_csv(output / "synthetic_ratio_crosscheck_curves.csv", index=False)
+    cluster_summary(paired, ["method", "category", "transformation_strength_ratio"], deltas,
+                    "source_image").to_csv(output / "synthetic_ratio_crosscheck_source_uncertainty.csv", index=False)
+    for (family, kind), values in delta_summary.groupby(["curve_family", "curve"]):
+        for metric in deltas:
             figure, axis = plt.subplots(figsize=(10, 6))
-            for method, group in values.groupby("method", sort=False):
+            for method, group in values.groupby("method"):
                 group = group.sort_values("curve_parameter")
                 axis.errorbar(group.curve_parameter, group[metric + "_mean"],
-                              yerr=group[metric + "_std"].fillna(0), marker="o", label=method, capsize=2)
-            axis.set_xlabel(kind + (" (degrees)" if kind == "rotation" else " (factor)" if kind == "scale" else " (relative fraction)"))
-            axis.set_ylabel(metric + " (mean ± sample std)")
-            axis.grid(alpha=0.2)
-            axis.legend(fontsize=8)
+                              yerr=group[metric + "_std"].fillna(0), marker="o", label=method)
+            axis.axhline(0, color="black", linewidth=.5)
+            axis.set(xlabel=kind + " parameter", ylabel=metric + " (mean ± source std)")
+            axis.legend(fontsize=7)
             figure.tight_layout()
-            figure.savefig(folder / f"{kind}_{metric}.png", dpi=150)
+            figure.savefig(output / f"synthetic_{family}_figures" / f"{kind}_{metric}.png", dpi=150)
             plt.close(figure)
-    translation = curves[curves.curve.isin(["translation_x", "translation_y"])]
-    for axis_name in ("translation_x", "translation_y"):
-        figure, axis = plt.subplots(figsize=(10, 6))
-        for method, group in translation[translation.curve == axis_name].groupby("method"):
+    # Preserve overlap-vs-quality views, with both BF strategies distinguished.
+    for kind in ("translation_x", "translation_y"):
+        figure, axis = plt.subplots(figsize=(12, 7))
+        for (method, strategy), group in curves[curves.curve == kind].groupby(["method", "matching_strategy"]):
             table = group.groupby("curve_parameter")[["overlap_ratio", "matching_score"]].mean().sort_values("overlap_ratio")
-            axis.plot(table.overlap_ratio, table.matching_score, "o-", label=method)
-        axis.set_xlabel("Geometric source overlap ratio")
-        axis.set_ylabel("Matching score (mean)")
-        axis.legend(fontsize=8)
+            axis.plot(table.overlap_ratio, table.matching_score, "o-", label=f"{method}/{strategy}")
+        axis.set(xlabel="Geometric source overlap ratio", ylabel="Matching score (mean)")
+        axis.legend(fontsize=7, bbox_to_anchor=(1.01, 1), loc="upper left")
         figure.tight_layout()
-        figure.savefig(folder / f"{axis_name}_overlap.png", dpi=150)
+        figure.savefig(output / "synthetic_geometry_figures" / f"{kind}_overlap.png", dpi=150)
         plt.close(figure)
 
 
-def learned_comparison(frame, control=None):
-    comparisons = [("sift", "sift_lightglue", "extractor and normalization differ"),
-                   ("superpoint", "superpoint_lightglue", "same SuperPoint features"),
-                   ("superpoint", "superpoint_superglue", "same SuperPoint features"),
-                   ("superpoint_lightglue", "superpoint_superglue", "same SuperPoint features"),
-                   ("sift_lightglue", "superpoint_lightglue", "different extractor, descriptor and pretrained matcher")]
+def learned_comparison(frame, control=None, return_pairs=False):
+    comparisons = [("sift", "bf_ratio", "sift_lightglue", "lightglue", "extractor and normalization differ"),
+                   ("sift_lightglue", "lightglue", "superpoint_lightglue", "lightglue", "different extractors/descriptors")]
+    sp = [("superpoint", "bf_ratio"), ("superpoint", "bf_crosscheck"),
+          ("superpoint_lightglue", "lightglue"), ("superpoint_superglue", "superglue")]
+    from itertools import combinations
+    comparisons += [(a, sa, b, sb, "same SuperPoint features") for (a, sa), (b, sb) in combinations(sp, 2)]
     if control is not None:
-        comparisons.append((CONTROL_CONFIG.name, "sift_lightglue", "same official-compatible RootSIFT features"))
+        rootsift = [(CONTROL_CONFIG.name, "bf_ratio"), (CONTROL_CONFIG.name, "bf_crosscheck"),
+                    ("sift_lightglue", "lightglue")]
+        comparisons += [(a, sa, b, sb, "same official-compatible RootSIFT features")
+                        for (a, sa), (b, sb) in combinations(rootsift, 2)]
         frame = pd.concat([frame, control], ignore_index=True)
+    paired_frames = []
     rows = []
-    for first, second, interpretation in comparisons:
-        left = frame[(frame.method == first) & (frame.matching_strategy != "bf_crosscheck")]
-        right = frame[(frame.method == second) & frame.matching_strategy.isin(LEARNED_MATCHERS)]
+    for first, first_strategy, second, second_strategy, interpretation in comparisons:
+        left = frame[(frame.method == first) & (frame.matching_strategy == first_strategy)]
+        right = frame[(frame.method == second) & (frame.matching_strategy == second_strategy)]
         merged = left.merge(right, on=["dataset", "sequence", "pair", "category"], suffixes=("_first", "_second"), validate="one_to_one")
         if not len(merged) or len(merged) != len(left) or len(merged) != len(right):
             raise ValueError("Missing learned comparison pairs")
@@ -330,19 +377,26 @@ def learned_comparison(frame, control=None):
             raise ValueError(f"Feature contents differ for matcher comparison {first}/{second}")
         same_measurement = (merged.extraction_id_image1_first.eq(merged.extraction_id_image1_second)
                             & merged.extraction_id_image2_first.eq(merged.extraction_id_image2_second))
+        if isolated_matcher and not same_measurement.all():
+            raise ValueError("Matcher-only controls must share actual extraction measurements; use one full run")
+        merged["first_method"], merged["second_method"] = first, second
+        merged["first_strategy"], merged["second_strategy"] = first_strategy, second_strategy
+        for metric in PAIRED_METRICS:
+            merged[metric + "_delta"] = merged[metric + "_second"].astype(float) - merged[metric + "_first"].astype(float)
+        paired_frames.append(merged)
         group_keys = ["dataset", "category"]
         if "transformation_strength_first" in merged:
             group_keys.append("transformation_strength_first")
         for labels, group in merged.groupby(group_keys):
             row = dict(zip(group_keys, labels))
-            row.update({"first": first, "second": second, "pair_count": len(group),
+            row.update({"first": first, "second": second, "first_strategy": first_strategy, "second_strategy": second_strategy, "pair_count": len(group),
                         "interpretation": interpretation, "identical_feature_contents": bool(shared.loc[group.index].all()),
                         "shared_extraction_measurement": bool(same_measurement.loc[group.index].all())})
             for metric in PAIRED_METRICS:
                 a, b = group[metric + "_first"].astype(float), group[metric + "_second"].astype(float)
                 delta = b - a
                 row.update({metric + "_first_mean": a.mean(), metric + "_second_mean": b.mean(),
-                            metric + "_delta_mean": delta.mean(), metric + "_delta_std": delta.std(),
+                            metric + "_delta_mean": delta.mean(), metric + "_delta_median": delta.median(), metric + "_delta_std": delta.std(),
                             metric + "_paired_valid_count": int(delta.count())})
             for suffix in ("first", "second"):
                 errors = group["homography_error_px_" + suffix]
@@ -352,7 +406,8 @@ def learned_comparison(frame, control=None):
                             f"homography_accuracy_3px_{suffix}": errors.le(3).mean(),
                             f"homography_accuracy_5px_{suffix}": errors.le(5).mean()})
             rows.append(row)
-    return pd.DataFrame(rows)
+    table = pd.DataFrame(rows)
+    return (table, pd.concat(paired_frames, ignore_index=True)) if return_pairs else table
 
 
 def build_report(results_root, output=None, scope="all", validate_only=False):
@@ -362,11 +417,14 @@ def build_report(results_root, output=None, scope="all", validate_only=False):
     for folder in folders:
         names = ["metadata.json", "complete.json"]
         names += ["fast_parameters.csv", "brief_sampling.csv"] if folder.name == "supplementary" else ["part1_raw_results.csv"]
+        if folder == root / "synthetic/raw":
+            names += ["sources.json", "pairs.json"]
         missing.extend(str(folder / name) for name in names if not (folder / name).is_file())
     if missing:
         print("PENDING — missing completed experiment outputs; no formal report generated:\n" + "\n".join(missing))
         return False
     datasets, metadata = {}, []
+    model_identities = {}
     supplementary = None
     for folder in folders:
         if folder.name == "supplementary":
@@ -400,11 +458,27 @@ def build_report(results_root, output=None, scope="all", validate_only=False):
             supplementary = (fast, brief)
             continue
         frame, meta = read_completed(folder)
+        for path in (folder / "models").glob("*.json"):
+            model = json.loads(path.read_text(encoding="utf-8"))
+            identities = {"checkpoint:" + key: value for key, value in model["checkpoint_sha256"].items()}
+            identities["extractor:" + model["extractor_source"]] = json.dumps(model["extractor"], sort_keys=True)
+            for key in ("torch", "cuda", "device", "gpu"):
+                identities["environment:" + key] = str(model[key])
+            for key, value in identities.items():
+                if key in model_identities and model_identities[key] != value:
+                    raise ValueError(f"Model/environment identity differs across stages: {key}")
+                model_identities[key] = value
         metadata.append(meta)
         if frame.dataset.nunique() != 1:
             raise ValueError("Mixed datasets in a raw CSV")
         datasets.setdefault(frame.dataset.iloc[0], []).append(frame)
     datasets = {name: pd.concat(parts, ignore_index=True) for name, parts in datasets.items()}
+    controls = {}
+    for name, frame in list(datasets.items()):
+        validate_configuration_rows(frame)
+        controls[name] = frame[~frame.is_primary].copy()
+        datasets[name] = frame[frame.is_primary].copy()
+
     if len({meta["code_sha256"] for meta in metadata}) != 1:
         raise ValueError("Experiment code/config identities differ")
     for key in ("python", "opencv", "numpy", "scipy", "platform", "opencv_threads"):
@@ -424,9 +498,26 @@ def build_report(results_root, output=None, scope="all", validate_only=False):
     if "synthetic" in datasets:
         validate_synthetic(datasets["synthetic"])
         synthetic_meta = next(meta for meta in metadata if meta.get("dataset") == "synthetic")
+        if (synthetic_meta.get("photometric_protocol") != PHOTOMETRIC_PROTOCOL
+                or synthetic_meta.get("expected_primary_records") != 5440
+                or synthetic_meta.get("expected_auxiliary_records") != 640):
+            raise ValueError("Incorrect synthetic protocol/count metadata")
         source_paths = {item["path"] for item in synthetic_meta["input_manifest"]}
         if set(datasets["synthetic"].source_image) != source_paths:
             raise ValueError("Synthetic CSV source paths differ from saved source manifest")
+        raw = root / "synthetic/raw"
+        dimensions = json.loads((raw / "sources.json").read_text(encoding="utf-8"))
+        pair_manifest = json.loads((raw / "pairs.json").read_text(encoding="utf-8"))
+        if set(dimensions) != source_paths or set(pair_manifest) != set(datasets["synthetic"].synthetic_pair_id):
+            raise ValueError("Synthetic dimension/pair manifests are incomplete")
+        for _, group in datasets["synthetic"].groupby("synthetic_pair_id"):
+            row = group.iloc[0]
+            expected_shape = [dimensions[row.source_image]["height"], dimensions[row.source_image]["width"]]
+            saved = pair_manifest[row.synthetic_pair_id]
+            if (expected_shape != [row.height_image1, row.width_image1]
+                    or saved["shape"] != expected_shape or saved["source"] != row.source_image
+                    or saved["H_gt"] != json.loads(row.H_gt)):
+                raise ValueError("Synthetic CSV and geometric manifests differ")
         hpatches_manifests = [meta["input_manifest"] for meta in metadata if meta["options"].get("dataset") == "hpatches"]
         if hpatches_manifests:
             reference_hashes = {item["path"]: item["sha256"] for item in hpatches_manifests[0]}
@@ -442,34 +533,62 @@ def build_report(results_root, output=None, scope="all", validate_only=False):
                 raise ValueError("Missing GRAF pair")
         validate_configuration_rows(graf)
         paired_bf(graf)
-    controls = {}
-    for dataset, count in (("hpatches", 580), ("graf", 2)):
-        suffix = "hpatches_sift_control" if dataset == "hpatches" else "graf_control"
-        control_folder = root / "lightglue" / suffix
-        if dataset not in datasets or not control_folder.exists():
-            continue
-        for name in ("metadata.json", "complete.json", "part1_raw_results.csv"):
-            if not (control_folder / name).is_file():
-                raise ValueError("SIFT-compatible control started but is incomplete")
-        control_frame, meta = read_completed(control_folder)
-        if (len(control_frame) != count or set(control_frame.method) != {CONTROL_CONFIG.name}
-                or set(control_frame.matching_strategy) != {"bf_ratio"} or control_frame.is_primary.any()
-                or set(control_frame.dataset) != {dataset} or meta["code_sha256"] != metadata[0]["code_sha256"]):
-            raise ValueError("Invalid auxiliary SIFT-compatible BF control")
-        source_meta = next(item for item in metadata if item["options"].get("dataset") == dataset)
-        if meta["input_manifest"] != source_meta["input_manifest"] or meta["options"]["device"] != source_meta["options"]["device"]:
-            raise ValueError("Auxiliary control uses different inputs/device")
-        validate_configuration_rows(control_frame)
-        controls[dataset] = control_frame
+    for dataset, frame in controls.items():
+        if dataset == "synthetic":
+            validate_synthetic(frame, auxiliary=True)
+        else:
+            expected_pairs = set(datasets[dataset].pair)
+            expected = {(m, strategy, pair) for m, strategy in control_combinations() for pair in expected_pairs}
+            if (len(frame) != len(expected)
+                    or set(zip(frame.method, frame.matching_strategy, frame.pair)) != expected):
+                raise ValueError(f"Incomplete required SIFT-compatible controls: {dataset}")
+            paired_bf(frame)
+    if scope == "all":
+        if len(datasets["hpatches"]) + len(datasets["synthetic"]) != 15300 or sum(map(len, controls.values())) != 1804:
+            raise ValueError("Expected 15300 HPatches+synthetic primary rows and 1804 auxiliary controls")
     control = controls.get("hpatches")
-    # Validate learned comparisons for every dataset even in validation-only mode.
-    learned = {name: learned_comparison(frame, controls.get(name)) for name, frame in datasets.items()}
+    # Includes all six SuperPoint and all three RootSIFT matcher pairings.
+    comparisons = {name: learned_comparison(frame, controls[name], return_pairs=True) for name, frame in datasets.items()}
+    learned = {name: value[0] for name, value in comparisons.items()}
     if validate_only:
-        print("Validated completed CSV inventories: " + ", ".join(f"{key}={len(frame)}" for key, frame in datasets.items()))
+        print("Validated primary inventories: " + ", ".join(f"{key}={len(frame)}" for key, frame in datasets.items())
+              + "; auxiliary=" + str({key: len(frame) for key, frame in controls.items()}))
         return True
     output = Path(output) if output is not None else root / "comparison"
     reserve_outputs([output])
     notes = ["# Part 1 measured results", "Tables below are generated from completed CSV files; no predicted ranking."]
+    for dataset, primary in datasets.items():
+        combined = pd.concat([primary, controls[dataset]], ignore_index=True)
+        combined.groupby(["is_primary", "method", "matching_strategy", "descriptor_dim", "descriptor_dtype", "bytes_per_descriptor"]).size().rename("record_count").reset_index().to_csv(output / f"{dataset}_descriptor_schema.csv", index=False)
+        times = []
+        for index in (1, 2):
+            columns = [f"extraction_id_image{index}", "feature_source", "extraction_device"]
+            columns += [f"{metric}_image{index}" for metric in ("detection_ms", "description_ms", "joint_extraction_ms")]
+            part = combined[columns].copy()
+            part.columns = ["extraction_id", "feature_source", "device", "detection_ms", "description_ms", "joint_extraction_ms"]
+            times.append(part)
+        unique_times = pd.concat(times, ignore_index=True).drop_duplicates()
+        if unique_times.extraction_id.duplicated().any():
+            raise ValueError("One extraction identity has inconsistent timing/device metadata")
+        unique_times.to_csv(output / f"{dataset}_unique_extraction_measurements.csv", index=False)
+        runtime_keys = ["is_primary", "method", "matching_strategy", "extraction_device", "matching_device"]
+        if dataset == "synthetic":
+            runtime_keys += ["transformation_type", "transformation_strength"]
+        aggregate(combined, runtime_keys, [name for name in QUALITY if "_ms" in name]).to_csv(output / f"{dataset}_runtime_by_device.csv", index=False)
+        pair_frame = comparisons[dataset][1]
+        pair_frame.to_csv(output / f"{dataset}_matcher_controls_paired.csv", index=False)
+        if dataset in ("hpatches", "synthetic"):
+            unit = "sequence" if dataset == "hpatches" else "source_image"
+            ci_keys = ["is_primary", "method", "matching_strategy", "category"]
+            pair_keys = ["first_method", "first_strategy", "second_method", "second_strategy", "category"]
+            if dataset == "synthetic":
+                ci_keys += ["transformation_strength"]
+                pair_keys += ["transformation_strength_first"]
+                pair_frame[unit] = pair_frame[unit + "_first"]
+            cluster_summary(combined, ci_keys, QUALITY, unit).to_csv(output / f"{dataset}_cluster_uncertainty.csv", index=False)
+            cluster_summary(pair_frame, pair_keys, [m + "_delta" for m in PAIRED_METRICS], unit).to_csv(output / f"{dataset}_matcher_control_uncertainty.csv", index=False)
+    (output / "uncertainty_protocol.json").write_text(json.dumps(BOOTSTRAP, indent=2), encoding="utf-8")
+    notes.append("95% percentile cluster bootstrap: 2000 resamples, seed 0. HPatches resamples whole sequences within illumination/viewpoint; synthetic resamples the eight fixed sources within each level. Synthetic intervals and leave-one-source-out ranges are descriptive, not population guarantees. Shared extraction IDs are counted once in unique extraction tables.")
     if "hpatches" in datasets:
         frame = datasets["hpatches"]
         keys = ["method", "matching_strategy", "category"]
@@ -480,6 +599,7 @@ def build_report(results_root, output=None, scope="all", validate_only=False):
         paired.to_csv(output / "ratio_crosscheck_paired.csv", index=False)
         deltas = [metric + "_delta_crosscheck_minus_ratio" for metric in PAIRED_METRICS]
         aggregate(paired, ["method", "category"], deltas).to_csv(output / "ratio_crosscheck_summary.csv", index=False)
+        cluster_summary(paired, ["method", "category"], deltas, "sequence").to_csv(output / "hpatches_ratio_crosscheck_cluster_ci.csv", index=False)
         learned["hpatches"].to_csv(output / "learned_comparisons.csv", index=False)
         if control is not None:
             aggregate(control, keys).to_csv(output / "sift_compatible_bf_control.csv", index=False)
@@ -491,7 +611,7 @@ def build_report(results_root, output=None, scope="all", validate_only=False):
                                   "descriptor_memory_bytes_image1", "descriptor_memory_bytes_image2"]).to_csv(output / "runtime_memory.csv", index=False)
         notes.extend([f"Primary HPatches records: {len(frame)}. Illumination/viewpoint are reported separately.",
                       f"BF comparisons have identical feature hashes. Shared extraction measurements: {int(paired.shared_extraction_measurement.sum())}/{len(paired)} paired rows.",
-                      "Separately invoked ratio/crosscheck stages can have identical contents but independent extraction measurements; shared --only bf is preferred.",
+                      "Matcher-only comparisons require identical feature hashes AND extraction IDs; separately extracted stages cannot form a strict full comparison.",
                       "Baseline SIFT versus SIFT+LightGlue changes both extraction parameters and RootSIFT normalization. Only the compatible BF control isolates the matcher.",
                       "SuperPoint BF, LightGlue and official outdoor SuperGlue share native features, scores and image dimensions; paired hashes and extraction identities are checked.",
                       "GPU and CPU timings exclude I/O, transfers, model initialization, GT evaluation, masks and RANSAC; repeated reference timings are shared measurements."])
@@ -499,7 +619,13 @@ def build_report(results_root, output=None, scope="all", validate_only=False):
     if "synthetic" in datasets:
         frame = datasets["synthetic"]
         keys = ["method", "matching_strategy", "transformation_type", "transformation_strength"]
-        aggregate(frame, keys).to_csv(output / "synthetic_summary.csv", index=False)
+        extra_metrics = ["overlap_ratio", "target_valid_ratio", "support_overlap_ratio", "features_before_mask_image1",
+                         "features_before_mask_image2", "photometric_clipped_fraction", "photometric_saturated_fraction"]
+        aggregate(frame, keys, QUALITY + extra_metrics).to_csv(output / "synthetic_summary.csv", index=False)
+        aggregate(controls["synthetic"], keys, QUALITY + extra_metrics).to_csv(output / "synthetic_sift_controls.csv", index=False)
+        homography_table(controls["synthetic"], keys).to_csv(output / "synthetic_sift_controls_homography.csv", index=False)
+        source_keys = ["source_image", "method", "matching_strategy", "transformation_type"]
+        aggregate(pd.concat([frame, controls["synthetic"]]), source_keys, QUALITY + extra_metrics).to_csv(output / "synthetic_source_descriptions.csv", index=False)
         homography_table(frame, keys).to_csv(output / "synthetic_homography.csv", index=False)
         learned["synthetic"].to_csv(output / "synthetic_learned_comparisons.csv", index=False)
         plot_synthetic(frame, output)
@@ -515,14 +641,17 @@ def build_report(results_root, output=None, scope="all", validate_only=False):
         notes.append("GRAF has two pairs only and is supplementary qualitative/geometric evidence.")
     if supplementary is not None:
         fast, brief = supplementary
-        fast.groupby(["method", "threshold", "nonmax"], dropna=False)[["keypoints1", "keypoints2", "repeatability", "detection_ms_image1", "detection_ms_image2"]].agg(["mean", "std", "count"]).to_csv(output / "fast_summary.csv")
-        brief.groupby("strategy")[["pmr", "precision", "recall", "matching_score", "description_ms_image1", "description_ms_image2", "matching_ms"]].agg(["mean", "std", "count"]).to_csv(output / "brief_summary.csv")
+        fast.groupby(["method", "threshold", "nonmax"], dropna=False)[["keypoints1", "keypoints2", "repeatability", "detection_ms_image1", "detection_ms_image2"]].agg(["mean", "median", "std", "count"]).to_csv(output / "fast_summary.csv")
+        brief.groupby("strategy")[["pmr", "precision", "recall", "matching_score", "description_ms_image1", "description_ms_image2", "matching_ms"]].agg(["mean", "median", "std", "count"]).to_csv(output / "brief_summary.csv")
         notes.append("FAST/BRIEF supplementary studies cover twelve selected pairs, not full HPatches.")
     notes.append("Homography mean, median, valid error count, failure count and success rate are separate. NaN estimates count as failures in threshold accuracy; RANSAC inliers do not imply GT-correct correspondences.")
     (output / "PART1_RESULTS.md").write_text("\n\n".join(notes) + "\n", encoding="utf-8")
     (output / "validation.json").write_text(json.dumps({"counts": {key: len(frame) for key, frame in datasets.items()},
                                                         "code_sha256": metadata[0]["code_sha256"],
-                                                        "control_count": len(control) if control is not None else 0}, indent=2), encoding="utf-8")
+                                                        "control_counts": {key: len(frame) for key, frame in controls.items()},
+                                                        "primary_hpatches_plus_synthetic": sum(len(datasets.get(key, [])) for key in ("hpatches", "synthetic")),
+                                                        "synthetic_family_counts": datasets["synthetic"].transformation_family.value_counts().to_dict() if "synthetic" in datasets else {},
+                                                        "protocol_version": PROTOCOL_VERSION}, indent=2), encoding="utf-8")
     print(f"Measured report saved to {output}")
     return True
 
@@ -536,7 +665,7 @@ def markdown_table(frame):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--results-root", type=Path, default=ROOT / "results")
+    parser.add_argument("--results-root", type=Path, default=RESULTS_ROOT)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--scope", choices=["all", "hpatches", "synthetic"], default="all")
     parser.add_argument("--validate-only", action="store_true")

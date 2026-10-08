@@ -29,7 +29,7 @@ class SyntheticGeometryTests(unittest.TestCase):
         grid = transformation_grid()
         self.assertEqual(len(grid), 28)
         self.assertEqual(sum(s.kind == "identity" for s in grid), 1)
-        self.assertEqual(expected_synthetic_records(), 2240)
+        self.assertEqual(expected_synthetic_records(), 5440)
         for setting in grid:
             H = homography_for(setting, self.shape)
             self.assertEqual(H.dtype, np.float64)

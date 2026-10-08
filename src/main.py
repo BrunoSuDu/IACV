@@ -9,7 +9,7 @@ matplotlib.use("Agg")
 
 from datasets.graf import iter_graf_pairs
 from datasets.hpatches import iter_hpatches_pairs
-from experiments.protocol import add_protocol_arguments, validate_options
+from experiments.protocol import RESULTS_ROOT, add_protocol_arguments, validate_options
 from experiments.runner import run_experiment
 from features import CLASSICAL_METHODS, CONFIGS, LEARNED_MATCHERS
 
@@ -36,7 +36,7 @@ def main():
     parser.add_argument("--sequences", nargs="+")
     parser.add_argument("--limit-pairs", type=int)
     parser.add_argument("--sift-control", action="store_true")
-    parser.add_argument("--results-root", type=Path, default=PROJECT_ROOT / "results")
+    parser.add_argument("--results-root", type=Path, default=RESULTS_ROOT)
     parser.add_argument("--output", type=Path, help="Isolated output, e.g. tmp/smoke_bf_ratio")
     options = parser.parse_args()
     validate_options(options)

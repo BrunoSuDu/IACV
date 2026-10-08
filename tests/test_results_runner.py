@@ -25,7 +25,7 @@ class ResultsRunnerTests(unittest.TestCase):
         self.assertEqual(len(MAIN_METHODS), 10)
         combinations = primary_combinations()
         self.assertEqual(len(combinations), 17)
-        self.assertEqual(len(combinations)*580 + 8*28*len(MAIN_METHODS), 12100)
+        self.assertEqual(len(combinations)*580 + 8*40*len(combinations), 15300)
         self.assertNotIn("sift_compatible_bf", CONFIGS)
         self.assertEqual(len(feature_groups(["superpoint", "superpoint_lightglue", "superpoint_superglue"])), 1)
         self.assertEqual(len(feature_groups(["sift", "sift_lightglue"])), 2)
@@ -145,7 +145,7 @@ class ResultsRunnerTests(unittest.TestCase):
         common.update({metric: 1.0 for metric in PAIRED_METRICS})
         common["homography_success"] = True
         methods = [("sift", "bf_ratio"), ("sift_lightglue", "lightglue"), ("superpoint", "bf_ratio"),
-                   ("superpoint_lightglue", "lightglue"), ("superpoint_superglue", "superglue")]
+                   ("superpoint", "bf_crosscheck"), ("superpoint_lightglue", "lightglue"), ("superpoint_superglue", "superglue")]
         records = [{**common, "method": method, "matching_strategy": strategy} for method, strategy in methods]
         table = learned_comparison(pd.DataFrame(records))
         comparisons = set(zip(table["first"], table["second"]))

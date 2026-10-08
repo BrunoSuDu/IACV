@@ -10,7 +10,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from datasets.graf import iter_graf_pairs
 from datasets.hpatches import iter_hpatches_pairs
 from datasets.synthetic import DEFAULT_MANIFEST, select_sources
-from experiments.protocol import (add_protocol_arguments, check_output, formal_options,
+from experiments.protocol import (RESULTS_ROOT, add_protocol_arguments, check_output, formal_options,
                                   validate_options, validate_pair_inventory)
 from experiments.runner import planned_outputs, run_experiment
 from features import BF_METHODS, LIGHTGLUE_METHODS, MAIN_METHODS, SUPERGLUE_METHODS
@@ -23,11 +23,10 @@ def main():
     parser.add_argument("--no-figures", dest="figures", action="store_false", help="Explicitly skip qualitative figures")
     parser.add_argument("--only", choices=["all", "experiments", "bf", "ratio", "crosscheck", "lightglue", "superglue",
                                           "synthetic", "supplementary", "report"], default="all")
-    parser.add_argument("--results-root", type=Path, default=ROOT / "results")
+    parser.add_argument("--results-root", type=Path, default=RESULTS_ROOT)
     parser.add_argument("--hpatches-root", type=Path, default=ROOT / "data/hpatches")
     parser.add_argument("--graf-root", type=Path, default=ROOT / "data/graf")
     parser.add_argument("--source-manifest", type=Path, default=DEFAULT_MANIFEST)
-    parser.add_argument("--no-sift-control", action="store_true", help="Omit auxiliary compatible BF control")
     args = parser.parse_args()
     validate_options(args)
     formal_options(args)
@@ -45,7 +44,7 @@ def main():
     sg_stage = full or args.only == "superglue"
     args.methods = (BF_METHODS if bf_stage else []) + (LIGHTGLUE_METHODS if lg_stage else []) + (SUPERGLUE_METHODS if sg_stage else [])
     args.bf_strategies = [args.only] if args.only in ("ratio", "crosscheck") else ["ratio", "crosscheck"]
-    args.sift_control = lg_stage and not args.no_sift_control
+    args.sift_control = lg_stage
     plans = []
     outputs = []
     # Inspect every input and every target before any experimental writes.
@@ -66,11 +65,12 @@ def main():
         synthetic.data_root = args.hpatches_root
         synthetic.output = args.results_root / "synthetic"
         synthetic.methods = MAIN_METHODS
-        synthetic.bf_strategies = ["ratio"]
-        synthetic.sift_control = False
+        synthetic.bf_strategies = ["ratio", "crosscheck"]
+        synthetic.sift_control = True
         synthetic.limit_sources = None
         synthetic.settings = None
-        select_sources(synthetic.data_root, synthetic.source_manifest)
+        from experiments.run_synthetic import selected_plan
+        selected_plan(synthetic)
         outputs.append(synthetic.output)
     supplementary = None
     if full or args.only == "supplementary":
