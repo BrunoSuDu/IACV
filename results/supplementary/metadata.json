@@ -1,0 +1,27 @@
+{
+  "warmup": 2,
+  "repetitions": 5,
+  "threads": 4,
+  "pairs": [
+    "graf_1_to_2",
+    "graf_1_to_4",
+    "i_ajuntament_1_to_2",
+    "i_ajuntament_1_to_3",
+    "i_ajuntament_1_to_4",
+    "i_ajuntament_1_to_5",
+    "i_ajuntament_1_to_6",
+    "v_adam_1_to_2",
+    "v_adam_1_to_3",
+    "v_adam_1_to_4",
+    "v_adam_1_to_5",
+    "v_adam_1_to_6"
+  ],
+  "brief_seed": 0,
+  "brief_bits": 256,
+  "brief_patch_size": 31,
+  "brief_blur": "7x7, sigma=sqrt(2)",
+  "brief_gaussian": "sigma=31/5; rounded and clamped to patch bounds",
+  "ratio": 0.8,
+  "correctness_threshold_px": 3,
+  "scope": "12 selected pairs; not a full HPatches benchmark"
+}

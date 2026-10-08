@@ -6,4 +6,4 @@ data/
 tmp/
 .env
 .ipynb_checkpoints/
-
+.pdf
