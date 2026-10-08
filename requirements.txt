@@ -1,0 +1,11 @@
+numpy
+scipy
+matplotlib
+scikit-image
+pandas
+psutil
+
+opencv-contrib-python==4.13.0.92
+
+jupyter
+ipykernel
