@@ -11,7 +11,7 @@ class FeatureConfig:
     detector: str
     descriptor: str
     norm: int
-    matcher: str = "bf_ratio"
+    matcher: str = "bf"
 
 
 CONFIGS = {
@@ -25,8 +25,29 @@ CONFIGS = {
     "superpoint_lightglue": FeatureConfig(
         "superpoint_lightglue", "superpoint", "superpoint", cv2.NORM_L2, "lightglue"
     ),
+    "sift_lightglue": FeatureConfig("sift_lightglue", "sift_compatible", "rootsift", cv2.NORM_L2, "lightglue"),
+    "superpoint_superglue": FeatureConfig(
+        "superpoint_superglue", "superpoint", "superpoint", cv2.NORM_L2, "superglue"
+    ),
 }
+LEARNED_MATCHERS = ("lightglue", "superglue")
+SUPERGLUE_METHODS = ["superpoint_superglue"]
 CLASSICAL_METHODS = ["sift", "orb", "kaze", "fast_brief", "fast_brisk", "fast_freak"]
+BF_METHODS = CLASSICAL_METHODS + ["superpoint"]
+LIGHTGLUE_METHODS = ["superpoint_lightglue", "sift_lightglue"]
+MAIN_METHODS = list(CONFIGS)
+# This control is deliberately outside the ten primary configurations.
+CONTROL_CONFIG = FeatureConfig("sift_compatible_bf", "sift_compatible", "rootsift", cv2.NORM_L2)
+
+
+def strategy_name(config, strategy="ratio"):
+    if config.matcher in LEARNED_MATCHERS:
+        if strategy not in (None, config.matcher):
+            raise ValueError(f"{config.name} requires {config.matcher}; BF strategy {strategy!r} is unsupported")
+        return config.matcher
+    if strategy not in ("ratio", "crosscheck"):
+        raise ValueError(f"Unsupported BF strategy: {strategy}")
+    return f"bf_{strategy}"
 
 
 @dataclass

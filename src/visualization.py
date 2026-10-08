@@ -44,6 +44,22 @@ def save_keypoint_visualization(
     plt.close()
 
 
+def save_synthetic_context(original, transformed, valid_mask, save_path, title):
+    figure, axes = plt.subplots(1, 3, figsize=(15, 5))
+    for axis, value, label in zip(axes, (original, transformed, valid_mask),
+                                  ("Original", "Transformed", "Valid content mask")):
+        axis.imshow(cv2.cvtColor(value, cv2.COLOR_BGR2RGB) if value.ndim == 3 else value,
+                    cmap="gray" if value.ndim == 2 else None)
+        axis.set_title(label)
+        axis.axis("off")
+    figure.suptitle(title)
+    figure.tight_layout()
+    path = Path(save_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    figure.savefig(path, dpi=150)
+    plt.close(figure)
+
+
 def save_match_visualization(
     image1,
     keypoints1,

@@ -4,7 +4,7 @@ from time import perf_counter
 import numpy as np
 
 
-def measure(operation, warmup=2, repetitions=10, synchronize=None):
+def measure(operation, warmup=2, repetitions=5, synchronize=None):
     if warmup < 0 or repetitions < 1:
         raise ValueError("warmup must be >= 0; repetitions must be >= 1")
     for _ in range(warmup):

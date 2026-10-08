@@ -1,63 +1,63 @@
-"""命令行入口；算法实现见 classical_pipeline.py 等模块。"""
+"""Independent manual dataset entry; defaults route into the formal results layout."""
 import argparse
 from pathlib import Path
 
 import cv2
 import numpy as np
 import matplotlib
-
-# 批量实验只保存图片，不依赖 Tk 等桌面 GUI 组件。
 matplotlib.use("Agg")
 
 from datasets.graf import iter_graf_pairs
 from datasets.hpatches import iter_hpatches_pairs
+from experiments.protocol import add_protocol_arguments, validate_options
 from experiments.runner import run_experiment
-from features import CLASSICAL_METHODS, CONFIGS
-
+from features import CLASSICAL_METHODS, CONFIGS, LEARNED_MATCHERS
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+class ExplicitMatchingStrategy(argparse.Action):
+    def __call__(self, parser, namespace, values, option_string=None):
+        setattr(namespace, self.dest, values)
+        namespace.matching_strategy_explicit = True
+
+
 def main():
-    parser = argparse.ArgumentParser(description="Part 1: feature matching evaluation")
+    parser = argparse.ArgumentParser(description=__doc__)
+    add_protocol_arguments(parser)
     parser.add_argument("--dataset", choices=["graf", "hpatches"], default="graf")
-    parser.add_argument("--data-root", type=Path, help="Dataset directory; defaults to data/<dataset>")
+    parser.add_argument("--data-root", type=Path)
     parser.add_argument("--methods", nargs="+", choices=list(CONFIGS), default=CLASSICAL_METHODS)
-    parser.add_argument("--sequences", nargs="+", help="Optional HPatches sequence names")
-    parser.add_argument("--limit-pairs", type=int, help="Small smoke test only")
-    parser.add_argument("--ratio", type=float, default=0.8)
-    parser.add_argument("--correctness-threshold", type=float, default=3.0)
-    parser.add_argument("--ransac-threshold", type=float, default=3.0)
-    parser.add_argument("--warmup", type=int, default=2)
-    parser.add_argument("--repetitions", type=int, default=10)
-    parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--threads", type=int, default=4)
-    parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
-    parser.add_argument("--max-keypoints", type=int, default=2048,
-                        help="Common feature cap; 0 keeps OpenCV defaults (classical only)")
-    parser.add_argument("--figures", action="store_true", help="One pair per category and method")
-    parser.add_argument("--output", type=Path)
+    parser.set_defaults(matching_strategy_explicit=False)
+    parser.add_argument("--matching-strategy", choices=["ratio", "crosscheck"], default="ratio",
+                        action=ExplicitMatchingStrategy,
+                        help="Default BF strategy is ratio; explicit BF flags reject learned matcher methods")
+    parser.add_argument("--bf-shared", action="store_true", help="Run ratio and crosscheck on one extraction")
+    parser.add_argument("--sequences", nargs="+")
+    parser.add_argument("--limit-pairs", type=int)
+    parser.add_argument("--sift-control", action="store_true")
+    parser.add_argument("--results-root", type=Path, default=PROJECT_ROOT / "results")
+    parser.add_argument("--output", type=Path, help="Isolated output, e.g. tmp/smoke_bf_ratio")
     options = parser.parse_args()
-    if options.warmup < 0 or options.repetitions < 1 or options.threads < 1:
-        parser.error("warmup >= 0, repetitions >= 1 and threads >= 1 required")
-    if not 0 < options.ratio < 1 or min(options.correctness_threshold, options.ransac_threshold) <= 0:
-        parser.error("ratio must be in (0, 1); geometric thresholds must be positive")
+    validate_options(options)
+    if len(set(options.methods)) != len(options.methods):
+        parser.error("Duplicate methods")
+    if options.matching_strategy_explicit and any(CONFIGS[m].matcher in LEARNED_MATCHERS for m in options.methods):
+        parser.error("Learned matchers do not accept --matching-strategy ratio/crosscheck; omit the flag")
+    if options.bf_shared and (options.matching_strategy_explicit or any(CONFIGS[m].matcher in LEARNED_MATCHERS for m in options.methods)):
+        parser.error("--bf-shared requires BF methods and no explicit single strategy")
     if options.limit_pairs is not None and options.limit_pairs < 1:
         parser.error("limit-pairs must be positive")
-    if options.max_keypoints < 0:
-        parser.error("max-keypoints must be >= 0")
-    if options.max_keypoints == 0 and any("superpoint" in m for m in options.methods):
-        parser.error("Use a positive max-keypoints value for learned methods")
+    options.bf_strategies = ["ratio", "crosscheck"] if options.bf_shared else [options.matching_strategy]
+    options.formal = False
+    options.routed = options.output is None
     options.data_root = options.data_root or PROJECT_ROOT / "data" / options.dataset
-    options.output = options.output or PROJECT_ROOT / "results" / options.dataset
     cv2.setNumThreads(options.threads)
     cv2.setRNGSeed(options.seed)
     np.random.seed(options.seed)
-    if options.dataset == "graf":
-        pairs = list(iter_graf_pairs(options.data_root))
-    else:
-        pairs = list(iter_hpatches_pairs(options.data_root, options.sequences))
-    if options.limit_pairs:
+    pairs = list(iter_graf_pairs(options.data_root)) if options.dataset == "graf" else list(
+        iter_hpatches_pairs(options.data_root, options.sequences))
+    if options.limit_pairs is not None:
         pairs = pairs[:options.limit_pairs]
     run_experiment(pairs, options)
 

@@ -16,6 +16,8 @@ from evaluation import (count_ground_truth_correspondences, evaluate_feature_mat
 from image_io import load_image
 from matching import match_descriptors
 from timing import measure
+from experiments.protocol import add_protocol_arguments, input_manifest, reserve_outputs, validate_options
+from experiments.reporting import save_metadata
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -48,11 +50,11 @@ def detector_study(pairs, warmup, repetitions):
     return pd.DataFrame(rows)
 
 
-def brief_study(pairs, warmup, repetitions):
+def brief_study(pairs, warmup, repetitions, seed=0):
     rows = []
     detector = create_detector("fast")
     for strategy in ("uniform", "gaussian"):
-        pattern = make_brief_pattern(strategy)
+        pattern = make_brief_pattern(strategy, seed=seed)
         for pair in pairs:
             _, image1 = load_image(pair.image1)
             _, image2 = load_image(pair.image2)
@@ -77,26 +79,39 @@ def brief_study(pairs, warmup, repetitions):
     return pd.DataFrame(rows)
 
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--warmup", type=int, default=2)
-    parser.add_argument("--repetitions", type=int, default=5)
-    args = parser.parse_args()
-    cv2.setNumThreads(4)
-    pairs = list(iter_graf_pairs(ROOT / "data/graf"))
-    pairs += list(iter_hpatches_pairs(ROOT / "data/hpatches", ["i_ajuntament", "v_adam"]))
-    output = ROOT / "results/supplementary"
-    output.mkdir(parents=True, exist_ok=True)
-    detector_study(pairs, args.warmup, args.repetitions).to_csv(output / "fast_parameters.csv", index=False)
-    brief_study(pairs, args.warmup, args.repetitions).to_csv(output / "brief_sampling.csv", index=False)
-    metadata = {"warmup": args.warmup, "repetitions": args.repetitions, "threads": 4,
-                "pairs": [p.name for p in pairs], "brief_seed": 0, "brief_bits": 256,
+def run_supplementary(args):
+    pairs = list(iter_graf_pairs(args.graf_root))
+    pairs += list(iter_hpatches_pairs(args.hpatches_root, ["i_ajuntament", "v_adam"]))
+    output = args.output
+    reserve_outputs([output])
+    metadata = {"pairs": [p.name for p in pairs], "brief_seed": args.seed, "brief_bits": 256,
+                "input_manifest": input_manifest([path for pair in pairs for path in (pair.image1, pair.image2, pair.homography)]),
                 "brief_patch_size": 31, "brief_blur": "7x7, sigma=sqrt(2)",
                 "brief_gaussian": "sigma=31/5; rounded and clamped to patch bounds",
                 "ratio": 0.8, "correctness_threshold_px": 3,
                 "scope": "12 selected pairs; not a full HPatches benchmark"}
-    (output / "metadata.json").write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+    save_metadata(args, pairs, metadata)
+    detector_study(pairs, args.warmup, args.repetitions).to_csv(output / "fast_parameters.csv", index=False)
+    brief_study(pairs, args.warmup, args.repetitions, args.seed).to_csv(output / "brief_sampling.csv", index=False)
+    (output / "complete.json").write_text(json.dumps({"fast_records": 7*len(pairs), "brief_records": 2*len(pairs)}), encoding="utf-8")
     print(f"Supplementary results saved to {output}")
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    add_protocol_arguments(parser)
+    parser.add_argument("--graf-root", type=Path, default=ROOT / "data/graf")
+    parser.add_argument("--hpatches-root", type=Path, default=ROOT / "data/hpatches")
+    parser.add_argument("--output", type=Path, default=ROOT / "results/supplementary")
+    args = parser.parse_args()
+    validate_options(args)
+    # This fixed supplementary protocol intentionally has no threshold sweeps.
+    if args.ratio != 0.8 or args.correctness_threshold != 3.0:
+        parser.error("Supplementary protocol fixes ratio=0.8 and correctness=3px")
+    cv2.setNumThreads(args.threads)
+    cv2.setRNGSeed(args.seed)
+    np.random.seed(args.seed)
+    run_supplementary(args)
 
 
 if __name__ == "__main__":

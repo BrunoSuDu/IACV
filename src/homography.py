@@ -12,22 +12,29 @@ def transform_points(points, homography):
     return projected
 
 
-def estimate_homography(keypoints1, keypoints2, matches, threshold_px=3.0, seed=0):
+def estimate_homography(keypoints1, keypoints2, matches, threshold_px=3.0, seed=0,
+                        max_iters=5000, confidence=0.995):
     """用全部 raw putative matches 做 RANSAC，不用 GT 筛选。"""
     metrics = {
         "homography_success": False,
         "ransac_inliers": 0,
         "ransac_inlier_ratio": 0.0 if matches else np.nan,
         "ransac_reprojection_error_px": np.nan,
+        "homography_failure_reason": "insufficient_matches",
     }
     if len(matches) < 4:
         return None, [], metrics
     points1 = np.float64([keypoints1[m.queryIdx].pt for m in matches])
     points2 = np.float64([keypoints2[m.trainIdx].pt for m in matches])
     cv2.setRNGSeed(seed)
-    estimated, mask = cv2.findHomography(
-        points1, points2, cv2.RANSAC, threshold_px, maxIters=5000, confidence=0.995
-    )
+    try:
+        estimated, mask = cv2.findHomography(
+            points1, points2, cv2.RANSAC, threshold_px, maxIters=max_iters, confidence=confidence
+        )
+    except cv2.error:
+        metrics["homography_failure_reason"] = "opencv_estimation_error"
+        return None, [], metrics
+    metrics["homography_failure_reason"] = "invalid_or_degenerate_estimate"
     if (estimated is None or mask is None or not np.isfinite(estimated).all()
             or np.linalg.matrix_rank(estimated) < 3):
         return None, [], metrics
@@ -38,6 +45,7 @@ def estimate_homography(keypoints1, keypoints2, matches, threshold_px=3.0, seed=
     inlier_matches = [match for match, keep in zip(matches, inlier_mask) if keep]
     metrics.update({
         "homography_success": True,
+        "homography_failure_reason": "",
         "ransac_inliers": len(inlier_matches),
         "ransac_inlier_ratio": len(inlier_matches) / len(matches),
         "ransac_reprojection_error_px": float(np.mean(residuals[inlier_mask])),

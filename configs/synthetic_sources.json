@@ -1,0 +1,8 @@
+{
+  "selection_rule": "Frozen first four lexicographically sorted i_ and v_ sequence names from the installed HPatches snapshot; independent of matching results; never substitute missing images",
+  "scene_diversity_status": "NOT CONFIRMED visually; user must inspect scenes before the final run",
+  "sources": [
+    "i_ajuntament/1.ppm", "i_autannes/1.ppm", "i_bologna/1.ppm", "i_books/1.ppm",
+    "v_abstract/1.ppm", "v_adam/1.ppm", "v_apprentices/1.ppm", "v_artisans/1.ppm"
+  ]
+}

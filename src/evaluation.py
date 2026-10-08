@@ -77,6 +77,7 @@ def project_keypoints(keypoints, H):
 def get_covisible_feature_mask(
     projected_points,
     image2_shape,
+    valid_region_mask=None,
 ):
     """
     Determine which projected Image-1 features remain
@@ -112,7 +113,30 @@ def get_covisible_feature_mask(
         & (y < height)
     )
 
-    return finite & inside
+    valid = finite & inside
+    if valid_region_mask is not None:
+        if valid_region_mask.shape != (height, width):
+            raise ValueError("Valid-region mask and image canvas must have the same shape")
+        indices = np.flatnonzero(valid)
+        coordinates = np.floor(projected_points[indices]).astype(int)
+        valid[indices] &= valid_region_mask[coordinates[:, 1], coordinates[:, 0]].astype(bool)
+    return valid
+
+
+def covisible_pair_masks(keypoints1, keypoints2, H, image2_shape,
+                         source_valid_mask=None, target_valid_mask=None):
+    points1, projected = project_keypoints(keypoints1, H)
+    query_visible = get_covisible_feature_mask(projected, image2_shape, target_valid_mask)
+    target_visible = np.ones(len(keypoints2), dtype=bool)
+    if source_valid_mask is not None:
+        query_visible &= get_covisible_feature_mask(points1, source_valid_mask.shape, source_valid_mask)
+        points2, inverse = project_keypoints(keypoints2, np.linalg.inv(H))
+        target_visible &= get_covisible_feature_mask(inverse, source_valid_mask.shape, source_valid_mask)
+        target_visible &= get_covisible_feature_mask(points2, image2_shape, target_valid_mask)
+    elif target_valid_mask is not None:
+        points2 = np.asarray([kp.pt for kp in keypoints2], np.float64).reshape(-1, 2)
+        target_visible &= get_covisible_feature_mask(points2, image2_shape, target_valid_mask)
+    return projected, query_visible, target_visible
 
 
 def count_ground_truth_correspondences(
@@ -184,6 +208,8 @@ def evaluate_feature_matching(
     H_gt,
     image2_shape,
     correctness_threshold=3.0,
+    source_valid_mask=None,
+    target_valid_mask=None,
 ):
     """
     Evaluate descriptor matching using ground-truth geometry.
@@ -239,9 +265,11 @@ def evaluate_feature_matching(
     if (len({m.queryIdx for m in putative_matches}) != len(putative_matches)
             or len({m.trainIdx for m in putative_matches}) != len(putative_matches)):
         raise ValueError("Evaluation requires one-to-one putative matches")
-    _, projected_points1 = project_keypoints(
-        keypoints1,
-        H_gt,
+    for match in putative_matches:
+        if not (0 <= match.queryIdx < len(keypoints1) and 0 <= match.trainIdx < len(keypoints2)):
+            raise ValueError("Match index outside aligned feature arrays")
+    projected_points1, valid_feature_mask, target_visible = covisible_pair_masks(
+        keypoints1, keypoints2, H_gt, image2_shape, source_valid_mask, target_valid_mask
     )
 
     points2 = np.float64(
@@ -251,11 +279,6 @@ def evaluate_feature_matching(
     # --------------------------------------------------
     # 1. Determine co-visible Image-1 features
     # --------------------------------------------------
-
-    valid_feature_mask = get_covisible_feature_mask(
-        projected_points1,
-        image2_shape,
-    )
 
     valid_feature_indices = set(
         np.flatnonzero(
@@ -274,7 +297,7 @@ def evaluate_feature_matching(
     evaluated_putative_matches = [
         match
         for match in putative_matches
-        if match.queryIdx in valid_feature_indices
+        if match.queryIdx in valid_feature_indices and target_visible[match.trainIdx]
     ]
 
     n_putative = len(
@@ -327,7 +350,7 @@ def evaluate_feature_matching(
     n_correspondences = (
         count_ground_truth_correspondences(
             projected_points1,
-            keypoints2,
+            [kp for kp, visible in zip(keypoints2, target_visible) if visible],
             valid_feature_mask,
             correctness_threshold=
                 correctness_threshold,
@@ -416,6 +439,12 @@ def evaluate_feature_matching(
 
 def validate_metrics(result):
     """任何计数/分母不一致都应停止实验，不能悄悄写入结果表。"""
+    for key in ("n_features", "n_putative", "n_correct", "n_correspondences", "n_incorrect"):
+        value = result[key]
+        if not np.isfinite(value) or value < 0 or value != int(value):
+            raise ValueError(f"Invalid integer count {key}: {value}")
+    if result["n_incorrect"] != result["n_putative"] - result["n_correct"]:
+        raise ValueError("Incorrect-match count is inconsistent")
     if not (0 <= result["n_correct"] <= result["n_putative"] <= result["n_features"]):
         raise ValueError(f"Invalid matching counts: {result}")
     if not (result["n_correct"] <= result["n_correspondences"] <= result["n_features"]):
@@ -424,6 +453,13 @@ def validate_metrics(result):
         value = result[name]
         if not np.isnan(value) and not 0 <= value <= 1:
             raise ValueError(f"Invalid {name}: {value}")
+    fractions = {"pmr": ("n_putative", "n_features"), "precision": ("n_correct", "n_putative"),
+                 "matching_score": ("n_correct", "n_features"), "recall": ("n_correct", "n_correspondences"),
+                 "repeatability": ("n_correspondences", "n_features")}
+    for name, (numerator, denominator) in fractions.items():
+        expected = result[numerator] / result[denominator] if result[denominator] else np.nan
+        if not np.isclose(result[name], expected, equal_nan=True):
+            raise ValueError(f"Inconsistent {name} numerator/denominator")
     if np.isfinite(result["precision"]) and np.isfinite(result["pmr"]):
         if not np.isclose(result["matching_score"], result["pmr"] * result["precision"]):
             raise ValueError("Matching score must equal PMR * precision")

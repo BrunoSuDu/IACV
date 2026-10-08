@@ -34,6 +34,7 @@ def match_descriptors(
     descriptors2,
     norm=cv2.NORM_L2,
     ratio_threshold=0.8,
+    matching_strategy="ratio",
 ):
     """
     Match descriptors using KNN matching with the requested distance
@@ -46,11 +47,20 @@ def match_descriptors(
     matching_time : float
         Matching runtime in seconds.
     """
-    if not 0 < ratio_threshold < 1:
+    if matching_strategy not in ("ratio", "crosscheck"):
+        raise ValueError(f"Unsupported matching strategy: {matching_strategy}")
+    if matching_strategy == "ratio" and not 0 < ratio_threshold < 1:
         raise ValueError("ratio_threshold must be between 0 and 1")
     if (descriptors1 is None or descriptors2 is None
-            or len(descriptors1) == 0 or len(descriptors2) < 2):
+            or len(descriptors1) == 0 or len(descriptors2) == 0
+            or (matching_strategy == "ratio" and len(descriptors2) < 2)):
         return [], 0.0
+
+    if matching_strategy == "crosscheck":
+        matcher = cv2.BFMatcher(normType=norm, crossCheck=True)
+        start = time.perf_counter()
+        matches = enforce_one_to_one(matcher.match(descriptors1, descriptors2))
+        return matches, time.perf_counter() - start
 
     matcher = cv2.BFMatcher(
         normType=norm,
